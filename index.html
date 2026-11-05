@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <!-- Se reemplaza por el valor de `--base-href` al compilar (ver tool/publicar_web.ps1). -->
+  <base href="/Ritmo-App/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="description" content="Ritmo">
+  <meta name="theme-color" content="#0F5C4D">
+
+  <!-- iPhone: "Agregar a pantalla de inicio" la abre como app, a pantalla completa. -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Ritmo">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Ritmo</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    html, body { margin: 0; height: 100%; background: #F3F4EF; }
+    #cargando {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    }
+    #cargando img { width: 72px; height: 72px; }
+  </style>
+</head>
+<body>
+  <div id="cargando"><img src="icons/Icon-192.png" alt="Ritmo"></div>
+  <!-- Márgenes del iPhone (muesca arriba, barra de inicio abajo): Flutter web no los lee solo. -->
+  <div id="margenes" style="position:fixed;visibility:hidden;pointer-events:none;
+    padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)"></div>
+  <script>
+    window.financeMargenes = function () {
+      const s = getComputedStyle(document.getElementById('margenes'));
+      return [parseFloat(s.paddingTop) || 0, parseFloat(s.paddingBottom) || 0];
+    };
+
+    // Entrar con Face ID / Touch ID (llave de acceso del iPhone, WebAuthn). Con la extensión
+    // PRF la llave da una clave secreta que cifra la sesión guardada (AES-GCM); sin PRF la
+    // sesión queda guardada solo detrás del Face ID.
+    (function () {
+      const sal = new TextEncoder().encode('habitos-llave-v1');
+      const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+      const deB64 = (t) => Uint8Array.from(atob(t), (c) => c.charCodeAt(0));
+      const azar = (n) => crypto.getRandomValues(new Uint8Array(n));
+      async function claveAes(secretoB64) {
+        const material = await crypto.subtle.digest('SHA-256', deB64(secretoB64));
+        return crypto.subtle.importKey('raw', material, 'AES-GCM', false, ['encrypt', 'decrypt']);
+      }
+      window.financeLlave = {
+        disponible: async function () {
+          try {
+            return !!(window.PublicKeyCredential &&
+              await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+          } catch (e) { return false; }
+        },
+        // Crea la llave (pide Face ID). Devuelve JSON {id, secreto} (secreto vacío sin PRF).
+        crear: async function (correo) {
+          const cred = await navigator.credentials.create({ publicKey: {
+            challenge: azar(32),
+            rp: { name: 'Ritmo' },
+            user: { id: azar(16), name: correo, displayName: correo },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+            authenticatorSelection: { authenticatorAttachment: 'platform',
+              userVerification: 'required', residentKey: 'preferred' },
+            extensions: { prf: { eval: { first: sal } } },
+          } });
+          const r = cred.getClientExtensionResults().prf || {};
+          const secreto = r.results && r.results.first ? b64(r.results.first) : '';
+          return JSON.stringify({ id: b64(cred.rawId), secreto: secreto, prf: !!(r.enabled || secreto) });
+        },
+        // Usa la llave (pide Face ID). Devuelve el secreto PRF (vacío si no hay PRF).
+        usar: async function (id) {
+          const a = await navigator.credentials.get({ publicKey: {
+            challenge: azar(32),
+            allowCredentials: [{ type: 'public-key', id: deB64(id) }],
+            userVerification: 'required',
+            extensions: { prf: { eval: { first: sal } } },
+          } });
+          const r = a.getClientExtensionResults().prf || {};
+          return r.results && r.results.first ? b64(r.results.first) : '';
+        },
+        cifrar: async function (secretoB64, texto) {
+          const iv = azar(12);
+          const datos = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv },
+            await claveAes(secretoB64), new TextEncoder().encode(texto));
+          return b64(iv) + '.' + b64(datos);
+        },
+        descifrar: async function (secretoB64, cifrado) {
+          const [iv, datos] = cifrado.split('.');
+          const plano = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: deB64(iv) },
+            await claveAes(secretoB64), deB64(datos));
+          return new TextDecoder().decode(plano);
+        },
+      };
+    })();
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
